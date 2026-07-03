@@ -28,6 +28,18 @@ jobs:
         with:
           fetch-depth: 0
           lfs: true
+          
+      - name: Safe update (append below config)
+        run: |
+          echo "" >> README.md
+          echo "<!-- update: $(date) -->" >> README.md
+
+      - name: Commit change
+        run: |
+          git config user.email "bot@example.com"
+          git config user.name "bot"
+          git add README.md
+          git commit -m "auto update" || echo "no changes"
 
       - name: Push to Hugging Face Space
         env:
