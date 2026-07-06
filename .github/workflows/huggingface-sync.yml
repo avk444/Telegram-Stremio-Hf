@@ -40,10 +40,11 @@ jobs:
           git remote add upstream https://github.com/weebzone/Telegram-stremio.git || true
           git fetch upstream
 
-          git checkout main
-          git merge upstream/master --no-edit
+          BRANCH=${GITHUB_REF_NAME}
 
-          git push origin master   
+          git checkout "$BRANCH"
+          git merge "upstream/$BRANCH" --no-edit
+          git push origin "$BRANCH"   
           
       - name: Safe update (append below config)
         run: |
