@@ -4,6 +4,7 @@ from Backend.logger import LOGGER
 from Backend import __version__, now, timezone
 from Backend.helper.settings_manager import SettingsManager
 from Backend.helper.exceptions import FileNotFound
+from Backend.helper.split_files import strip_part_suffix
 from aiofiles import open as aiopen
 from aiofiles.os import path as aiopath, remove as aioremove
 from pyrogram import Client
@@ -95,27 +96,40 @@ def get_readable_file_size(size_in_bytes):
     return f'{size_in_bytes:.2f}{SIZE_UNITS[index]}' if index > 0 else f'{size_in_bytes:.0f}B'
 
 
+def remove_urls(text):
+    if not text:
+        return ""
+
+    url_pattern = r'\b(?:https?|ftp):\/\/[^\s/$.?#].[^\s]*'
+    text_without_urls = re.sub(url_pattern, '', text)
+    cleaned_text = re.sub(r'\s+', ' ', text_without_urls).strip()
+
+    return cleaned_text
+
 def clean_filename(filename: str) -> str:
     if not filename:
         return "unknown_file"
 
-    #----- 1 – Remove emoji sequences
+    #----- 1 – Strip URLs that captions sometimes prepend
+    filename = remove_urls(filename)
+    
+    #----- 2 – Remove emoji sequences
     filename = _EMOJI_PATTERN.sub(" ", filename)
 
-    #----- 2 – Remove decorative unicode symbols
+    #----- 3 – Remove decorative unicode symbols
     filename = _DECORATION_PATTERN.sub(" ", filename)
 
-    #----- 3 – Replace any remaining non-ASCII characters with a space.
+    #----- 4 – Replace any remaining non-ASCII characters with a space.
     #----- Keep standard filename-safe characters: alphanumerics, . - _ ( ) [ ] ' " , : ! ? & + @
     filename = re.sub(r"[^\x20-\x7E]", " ", filename)
 
-    #----- 4 – Remove Telegram channel tags  (@ChannelName_ etc.)
+    #----- 5 – Remove Telegram channel tags  (@ChannelName_ etc.)
     filename = _CHANNEL_TAG_PATTERN.sub("", filename)
 
-    #----- 5 – Remove codec / source tags that clutter the title region
+    #----- 6 – Remove codec / source tags that clutter the title region
     filename = _CODEC_TAG_PATTERN.sub(" ", filename)
 
-    #----- 6 – Collapse multiple spaces; remove space before extension dot
+    #----- 7 – Collapse multiple spaces; remove space before extension dot
     filename = re.sub(r"\s+", " ", filename).strip().replace(" .", ".")
 
     return filename if filename else "unknown_file"
@@ -152,15 +166,16 @@ def get_readable_time(seconds: int) -> str:
     return readable_time
 
 
-def remove_urls(text):
-    if not text:
-        return ""
-
-    url_pattern = r'\b(?:https?|ftp):\/\/[^\s/$.?#].[^\s]*'
-    text_without_urls = re.sub(url_pattern, '', text)
-    cleaned_text = re.sub(r'\s+', ' ', text_without_urls).strip()
-
-    return cleaned_text
+#----- Build the display filename stored for a media entry: drop URLs, emoji and
+#----- decorative symbols, strip the split-part suffix (.001), and force a video extension.
+def finalize_media_name(title: str, is_split: bool = False) -> str:
+    title = _DECORATION_PATTERN.sub(" ", _EMOJI_PATTERN.sub(" ", remove_urls(title)))
+    title = re.sub(r"\s+", " ", title).strip().replace(" .", ".")
+    if is_split:
+        title = strip_part_suffix(title)
+    if not title.endswith((".mkv", ".mp4")):
+        title += ".mkv"
+    return title
 
 
 async def restart_notification():
