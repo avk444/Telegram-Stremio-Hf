@@ -48,8 +48,12 @@ from Backend.fastapi.routes.api_routes import (
     get_subscription_plans_api,
     get_settings_api,
     get_logs_api,
+    get_manual_session_api,
     get_system_stats_api,
     get_tools_channels_api,
+    clear_manual_session_api,
+    search_manual_session_api,
+    set_manual_session_api,
     health_api,
     health_report_api,
     setup_status_api,
@@ -58,6 +62,8 @@ from Backend.fastapi.routes.api_routes import (
     list_media_api,
     manage_subscriber_api,
     manual_add_media_api,
+    list_manual_add_catalogs_api,
+    resolve_manual_metadata_api,
     purge_dead_links_api,
     remove_custom_catalog_item_api,
     resolve_telegram_api,
@@ -173,8 +179,8 @@ async def admin_dashboard(request: Request, _: bool = Depends(require_auth)):
     return await admin_dashboard_page(request, _)
 
 @app.get("/media/manage", response_class=HTMLResponse)
-async def media_management(request: Request, media_type: str = "movie", _: bool = Depends(require_auth)):
-    return await media_management_page(request, media_type, _)
+async def media_management(request: Request, media_type: str = "movie", custom: bool = False, _: bool = Depends(require_auth)):
+    return await media_management_page(request, media_type, custom, _)
 
 @app.get("/catalogs", response_class=HTMLResponse)
 async def custom_catalogs(request: Request, _: bool = Depends(require_auth)):
@@ -190,9 +196,10 @@ async def list_media(
     page: int = Query(1, ge=1),
     page_size: int = Query(24, ge=1, le=100),
     search: str = Query("", max_length=100),
+    custom: bool = Query(False),
     _: bool = Depends(require_auth)
 ):
-    return await list_media_api(media_type, page, page_size, search)
+    return await list_media_api(media_type, page, page_size, search, custom)
 
 @app.delete("/api/media/delete")
 async def delete_media(tmdb_id: int, db_index: int, media_type: str, _: bool = Depends(require_auth)):
@@ -401,6 +408,14 @@ async def resolve_telegram(payload: dict, _: bool = Depends(require_auth)):
 async def manual_add_media(payload: dict, _: bool = Depends(require_auth)):
     return await manual_add_media_api(payload)
 
+@app.get("/api/media/manual-add/catalogs")
+async def manual_add_catalogs(_: bool = Depends(require_auth)):
+    return await list_manual_add_catalogs_api()
+
+@app.get("/api/media/manual-add/resolve-meta")
+async def manual_add_resolve_meta(media_type: str, selected_id: str, _: bool = Depends(require_auth)):
+    return await resolve_manual_metadata_api(media_type, selected_id)
+
 
 #----- Custom catalog management
 @app.get("/api/custom-catalogs")
@@ -556,6 +571,22 @@ async def admin_tools(request: Request, _: bool = Depends(require_auth)):
 @app.get("/api/admin/tools/channels")
 async def tools_channels(_: bool = Depends(require_auth)):
     return await get_tools_channels_api()
+
+@app.get("/api/admin/tools/manual-session")
+async def tools_manual_session_get(_: bool = Depends(require_auth)):
+    return await get_manual_session_api()
+
+@app.get("/api/admin/tools/manual-session/search")
+async def tools_manual_session_search(query: str = Query(""), _: bool = Depends(require_auth)):
+    return await search_manual_session_api(query)
+
+@app.post("/api/admin/tools/manual-session")
+async def tools_manual_session_set(payload: dict, _: bool = Depends(require_auth)):
+    return await set_manual_session_api(payload)
+
+@app.delete("/api/admin/tools/manual-session")
+async def tools_manual_session_clear(_: bool = Depends(require_auth)):
+    return await clear_manual_session_api()
 
 @app.post("/api/admin/tools/scan/start")
 async def tools_scan_start(payload: dict, _: bool = Depends(require_auth)):
