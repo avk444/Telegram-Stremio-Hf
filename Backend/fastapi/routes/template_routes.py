@@ -144,7 +144,6 @@ async def dashboard_page(request: Request, _: bool = Depends(require_auth)):
         }
 
     ctx["system_stats"] = system_stats
-    ctx["api_tokens"] = await db.get_all_api_tokens()
     return templates.TemplateResponse("dashboard.html", ctx)
 
 
