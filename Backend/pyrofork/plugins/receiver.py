@@ -11,11 +11,12 @@ from Backend import db
 from Backend.helper.announcer import announce_new_media
 from Backend.helper.auto_catalog import start_single_media_catalog_sync
 from Backend.helper.encrypt import encode_string
-from Backend.helper.manual_add import resolve_telegram_message
+from Backend.helper.manual_add import resolve_telegram_message, stamp_caption_with_id
 from Backend.helper.requests_manager import auto_fulfill
 from Backend.helper.metadata import extract_default_id, metadata
 from Backend.helper.pyro import clean_filename, finalize_media_name, get_readable_file_size
 from Backend.helper.settings_manager import SettingsManager
+from Backend.helper.skip_channel import is_skip_channel, route_to_skip_channel
 from Backend.helper.split_files import parse_split_info
 from Backend.helper.subtitles import ingest_subtitle, is_subtitle_file, remove_subtitle
 from Backend.logger import LOGGER
@@ -115,9 +116,6 @@ def _max_episode(doc: dict, season_number: int) -> int:
     return 0
 
 
-#----- Add a forwarded file as a stream on a personal-session title.
-#----- Personal files carry no metadata, so season/episode come from the session and
-#----- the quality is auto-detected from the video (falling back to the session value).
 async def _handle_personal_session(client: Client, message: Message) -> None:
     session = Backend.MANUAL_SESSION
     if not session:
@@ -182,6 +180,7 @@ async def _handle_personal_session(client: Client, message: Message) -> None:
             where = (f"S{metadata_info['season_number']:02d}E{metadata_info['episode_number']:02d} "
                      if media_type == "tv" else "")
             LOGGER.info(f"[Manual Session] Added {quality} {where}to '{metadata_info.get('title')}' (id {tmdb_id}).")
+            create_task(stamp_caption_with_id(message, metadata_info))
         else:
             LOGGER.warning(f"[Manual Session] Insert failed for message {message.id}.")
 
@@ -189,6 +188,9 @@ async def _handle_personal_session(client: Client, message: Message) -> None:
 #----- Ingest new channel media into the queue after building metadata
 @Client.on_message(filters.channel & (filters.document | filters.video))
 async def file_receive_handler(client: Client, message: Message):
+    if is_skip_channel(message):
+        return
+
     session = Backend.MANUAL_SESSION
     is_manual = _is_manual_channel(message.chat.id)
 
@@ -222,14 +224,18 @@ async def file_receive_handler(client: Client, message: Message):
 
         _, title, msg_id, raw_size, size, channel = _extract_fields(message)
 
-        metadata_info = await metadata(clean_filename(title), int(channel), msg_id, override_id=override_id, season_hint=season_hint)
+        metadata_info = await metadata(clean_filename(title), int(channel), msg_id, override_id=override_id or extract_default_id(message.caption or ""), season_hint=season_hint)
         if metadata_info is None:
             LOGGER.warning(f"Metadata failed for file: {title} (ID: {msg_id})")
+            await route_to_skip_channel(client, message)
             return
 
         title = _finalize_title(title, metadata_info)
 
         await file_queue.put((metadata_info, int(channel), msg_id, size, raw_size, title))
+
+        if is_real_session:
+            create_task(stamp_caption_with_id(message, metadata_info))
     except FloodWait as e:
         LOGGER.info(f"Sleeping for {str(e.value)}s")
         await asleep(e.value)
@@ -238,6 +244,15 @@ async def file_receive_handler(client: Client, message: Message):
             disable_web_page_preview=True,
             parse_mode=ParseMode.MARKDOWN
         )
+
+
+def _override_matches_indexed(override_id: str, imdb_id, tmdb_id) -> bool:
+    oid = str(override_id).strip().lower()
+    if oid.startswith("tt"):
+        return bool(imdb_id) and oid == str(imdb_id).strip().lower()
+    if oid.isdigit():
+        return tmdb_id not in (None, "") and oid == str(tmdb_id).strip()
+    return False
 
 
 #----- Re-index an edited channel file only when it carries an override ID
@@ -252,6 +267,10 @@ async def file_edited_handler(client: Client, message: Message):
         _, title, msg_id, raw_size, size, channel = _extract_fields(message)
         override_id = extract_default_id(message.caption) if message.caption else None
         if not override_id:
+            return
+
+        existing_ids = await db.get_media_ids_by_part(int(channel), msg_id)
+        if existing_ids and _override_matches_indexed(override_id, existing_ids[0], existing_ids[1]):
             return
 
         LOGGER.info(f"Detected override ID '{override_id}' in edited message {msg_id}")

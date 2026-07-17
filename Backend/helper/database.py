@@ -1123,6 +1123,34 @@ class Database:
         size_str = get_readable_file_size(total_bytes)
         return encoded, size_str
 
+    async def get_media_ids_by_part(
+        self, channel: int, msg_id: int
+    ) -> Optional[Tuple[Optional[str], Optional[int]]]:
+        try:
+            legacy_hash = await encode_string({"chat_id": channel, "msg_id": msg_id})
+        except Exception:
+            legacy_hash = None
+
+        part_match = {"$elemMatch": {"chat_id": channel, "msg_id": msg_id}}
+        projection = {"imdb_id": 1, "tmdb_id": 1}
+
+        for i in range(1, self.current_db_index + 1):
+            db = self.dbs[f"storage_{i}"]
+
+            movie_or = [{"telegram.parts": part_match}]
+            tv_or = [{"seasons.episodes.telegram.parts": part_match}]
+            if legacy_hash:
+                movie_or.append({"telegram.id": legacy_hash})
+                tv_or.append({"seasons.episodes.telegram.id": legacy_hash})
+
+            doc = await db["movie"].find_one({"$or": movie_or}, projection)
+            if not doc:
+                doc = await db["tv"].find_one({"$or": tv_or}, projection)
+            if doc:
+                return doc.get("imdb_id"), doc.get("tmdb_id")
+
+        return None
+
     async def remove_media_part(self, channel: int, msg_id: int) -> bool:
         try:
             legacy_hash = await encode_string({"chat_id": channel, "msg_id": msg_id})
@@ -1194,7 +1222,8 @@ class Database:
 
     async def insert_media(
         self, metadata_info: dict,
-        channel: int, msg_id: int, size: str, name: str, raw_size: int = 0
+        channel: int, msg_id: int, size: str, name: str, raw_size: int = 0,
+        status: Optional[dict] = None
     ) -> Optional[ObjectId]:
 
         group_key = metadata_info.get("group_key")
@@ -1245,7 +1274,7 @@ class Database:
                 origin_country=metadata_info.get('origin_country', []) or [],
                 telegram=[quality_detail]
             )
-            return await self.update_movie(media)
+            return await self.update_movie(media, status)
         else:
             tv_show = TVShowSchema(
                 tmdb_id=metadata_info['tmdb_id'],
@@ -1277,7 +1306,7 @@ class Database:
                     )]
                 )]
             )
-            return await self.update_tv_show(tv_show)
+            return await self.update_tv_show(tv_show, status)
 
     async def _delete_split_part(self, part: dict) -> None:
         try:
@@ -1335,8 +1364,16 @@ class Database:
         size = str(quality.get("size") or "").strip().lower()
         return (quality.get("quality"), name, size)
 
+    @staticmethod
+    def _is_personal_tmdb(tmdb_id) -> bool:
+        try:
+            return int(tmdb_id) < 0
+        except (TypeError, ValueError):
+            return False
+
     async def _apply_quality_update(
-        self, existing_qualities: List[dict], quality_to_update: dict
+        self, existing_qualities: List[dict], quality_to_update: dict,
+        is_personal: bool = False, status: Optional[dict] = None
     ) -> List[dict]:
         target_quality = quality_to_update.get("quality")
         incoming_group_key = quality_to_update.get("group_key")
@@ -1373,16 +1410,18 @@ class Database:
             return existing_qualities
 
         #----- REPLACE_MODE off: skip exact duplicates when protection is on, else stack.
-        if SettingsManager.current().duplicate_protection:
+        if SettingsManager.current().duplicate_protection and not is_personal:
             key = self._dup_key(quality_to_update)
             for q in existing_qualities:
                 if not q.get("group_key") and self._dup_key(q) == key:
                     LOGGER.info(f"Duplicate protection: skipped existing stream '{quality_to_update.get('name')}'.")
+                    if status is not None:
+                        status["duplicate_skipped"] = True
                     return existing_qualities
         existing_qualities.append(quality_to_update)
         return existing_qualities
 
-    async def update_movie(self, movie_data: MovieSchema) -> Optional[ObjectId]:
+    async def update_movie(self, movie_data: MovieSchema, status: Optional[dict] = None) -> Optional[ObjectId]:
         try:
             movie_dict = movie_data.dict()
         except ValidationError as e:
@@ -1427,7 +1466,9 @@ class Database:
 
         existing_qualities = existing_movie.get("telegram", [])
 
-        existing_qualities = await self._apply_quality_update(existing_qualities, quality_to_update)
+        existing_qualities = await self._apply_quality_update(
+            existing_qualities, quality_to_update, self._is_personal_tmdb(tmdb_id), status
+        )
 
         existing_movie["telegram"] = existing_qualities
         existing_movie["updated_on"] = datetime.utcnow()
@@ -1449,7 +1490,7 @@ class Database:
             if any(keyword in str(e).lower() for keyword in ["storage", "quota"]):
                 return await self._handle_storage_error(self.update_movie, movie_data, total_storage_dbs=total_storage_dbs)
 
-    async def update_tv_show(self, tv_show_data: TVShowSchema) -> Optional[ObjectId]:
+    async def update_tv_show(self, tv_show_data: TVShowSchema, status: Optional[dict] = None) -> Optional[ObjectId]:
         try:
             tv_show_dict = tv_show_data.dict()
         except ValidationError as e:
@@ -1516,7 +1557,7 @@ class Database:
 
                 for quality in episode["telegram"]:
                     existing_episode["telegram"] = await self._apply_quality_update(
-                        existing_episode["telegram"], quality
+                        existing_episode["telegram"], quality, self._is_personal_tmdb(tmdb_id), status
                     )
 
         existing_tv["updated_on"] = datetime.utcnow()
@@ -1729,10 +1770,6 @@ class Database:
         document = await self.dbs[db_key][collection_name].find_one({"tmdb_id": int(tmdb_id)})
         return convert_objectid_to_str(document) if document else None
 
-    #----- Batch-hydrate media docs for a list of catalog item refs.
-    #----- Groups lookups by (db_index, collection) into a single $in query
-    #----- each, then returns docs in the same order as `refs`. Missing docs
-    #----- are skipped. Replaces N sequential get_document() round-trips.
     async def get_documents(self, refs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not refs:
             return []
@@ -2064,9 +2101,6 @@ class Database:
             return convert_objectid_to_str(existing)
         return await self.add_api_token(name or f"User {user_id}", user_id=user_id)
 
-    #----- Make a user's token follow their subscription: drop any standalone
-    #----- grant (never-expires / token-expiry) so revoke/extend actually apply.
-    #----- No-op when subscription mode is off (token keeps its own expiry there).
     async def align_token_with_subscription(self, user_id: int) -> None:
         if not SettingsManager.current().subscription:
             return
