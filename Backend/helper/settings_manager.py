@@ -43,6 +43,10 @@ _DEFAULTS: Dict[str, Any] = {
     "better_poster": "",
     "rpdb_enabled": False,
     "rpdb_api_key": "",
+    "fanart_enabled": False,
+    "fanart_api_key": "",
+    "fanart_shuffle": False,
+    "fanart_shuffle_interval": 5,
 }
 
 
@@ -199,10 +203,29 @@ class Settings:
     def rpdb_api_key(self) -> str:
         return str(self._d.get("rpdb_api_key") or "").strip()
 
+    @property
+    def fanart_enabled(self) -> bool:
+        return bool(self._d.get("fanart_enabled", False))
+
+    @property
+    def fanart_api_key(self) -> str:
+        return str(self._d.get("fanart_api_key") or "").strip()
+
+    @property
+    def fanart_shuffle(self) -> bool:
+        return bool(self._d.get("fanart_shuffle", False))
+
     #----- Integers
     @property
     def subscription_group_id(self) -> int:
         return int(self._d.get("subscription_group_id") or 0)
+
+    @property
+    def fanart_shuffle_interval(self) -> int:
+        try:
+            return max(0, int(self._d.get("fanart_shuffle_interval", 5)))
+        except (ValueError, TypeError):
+            return 5
 
     #----- Lists
     @property
