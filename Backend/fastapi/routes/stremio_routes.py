@@ -31,6 +31,20 @@ ADDON_NAME = "Telegram"
 ADDON_VERSION = __version__
 PAGE_SIZE = 15
 
+
+#----- Wrap a direct stream URL with the configured proxy (plain prepend or MediaFlow)
+def build_proxy_url(original_url: str) -> str | None:
+    settings = SettingsManager.current()
+    base = settings.http_proxy_url
+    if not base:
+        return None
+    if settings.mediaflow_proxy:
+        url = f"{base.rstrip('/')}/proxy/stream?d={quote(original_url, safe='')}"
+        if settings.mediaflow_password:
+            url += f"&api_password={quote(settings.mediaflow_password, safe='')}"
+        return url
+    return f"{base}{original_url}"
+
 _membership_cache: dict = {}
 _MEMBERSHIP_TTL = 60
 _MEMBERSHIP_CACHE_MAX = 5000
@@ -125,6 +139,13 @@ def _abs_media_url(value: str) -> str:
     return f"{SettingsManager.current().base_url}{value[idx:]}" if idx != -1 else value
 
 
+def _poster_url(imdb_id: str, fallback: str) -> str:
+    template = SettingsManager.current().better_poster
+    if template and imdb_id:
+        return template.replace("{imdb_id}", str(imdb_id))
+    return _abs_media_url(fallback)
+
+
 #----- Map an internal media item into a Stremio meta object
 def convert_to_stremio_meta(item: dict) -> dict:
     media_type = "series" if item.get("media_type") == "tv" else "movie"
@@ -133,7 +154,7 @@ def convert_to_stremio_meta(item: dict) -> dict:
         "id": item.get('imdb_id'),
         "type": media_type,
         "name": item.get("title"),
-        "poster": _abs_media_url(item.get("poster")),
+        "poster": _poster_url(item.get("imdb_id"), item.get("poster")),
         "logo": item.get("logo") or "",
         "year": item.get("release_year"),
         "releaseInfo": str(item.get("release_year", "")),
@@ -455,7 +476,7 @@ async def get_meta(token: str, media_type: str, id: str, token_data: dict = Depe
         "year": str(media.get("release_year", "")),
         "imdbRating": str(media.get("rating", "")),
         "genres": media.get("genres", []),
-        "poster": _abs_media_url(media.get("poster")),
+        "poster": _poster_url(media.get("imdb_id") or imdb_id, media.get("poster")),
         "logo": media.get("logo", ""),
         "background": _abs_media_url(media.get("backdrop")),
         "imdb_id": media.get("imdb_id", ""),
@@ -681,7 +702,7 @@ async def get_streams(
                         stream_name = f"{stream_name} {label}"
 
                 original_url = f"{SettingsManager.current().base_url}/dl/{token}/{quality.get('id')}/video.mkv"
-                proxy_url = f"{SettingsManager.current().http_proxy_url}{original_url}" if SettingsManager.current().http_proxy_url else None
+                proxy_url = build_proxy_url(original_url)
 
                 if SettingsManager.current().show_proxy_and_non_proxy_both and proxy_url:
                     streams.append({"name": f"{stream_name} (Proxy)", "title": stream_title, "url": proxy_url, "size_bytes": size_bytes, "episode_start": episode_start, "name_key": name_key})
